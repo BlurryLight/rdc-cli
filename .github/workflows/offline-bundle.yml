@@ -12,6 +12,8 @@ name: Offline bundle
 # (breakpad + pyrenderdoc_module + renderdoccmd) instead of the Qt-based solution.
 
 on:
+  push:
+    branches: [master, ci/offline-bundle]
   workflow_dispatch:
     inputs:
       renderdoc_version:
@@ -178,7 +180,7 @@ jobs:
           retention-days: 14
 
       - name: Upload GitHub release
-        if: inputs.publish
+        if: github.event_name == 'push' || inputs.publish
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
