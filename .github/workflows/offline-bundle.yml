@@ -38,6 +38,7 @@ permissions:
 
 env:
   PYTHON_VERSION: "3.12"
+  PYTHONIOENCODING: "utf-8"
   PAYLOAD_DIR: ${{ github.workspace }}/payload/win-x64
   APK_DIR: ${{ github.workspace }}/payload/share/renderdoc/plugins/android
 

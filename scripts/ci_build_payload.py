@@ -57,6 +57,18 @@ PROJECTS = (
 MSBUILD_FLAGS = ["/p:Configuration=Release", "/p:Platform=x64", "/p:PlatformToolset=v143"]
 
 
+def _configure_console() -> None:
+    """Never crash on a cp1252/cp936 console (GitHub runner and legacy cmd)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):  # pragma: no cover - not a TextIOWrapper
+            pass
+
+
+_configure_console()
+
+
 def log(message: str) -> None:
     print(f"[payload] {message}", flush=True)
 

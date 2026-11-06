@@ -47,6 +47,18 @@ MODULE_FILES = ("renderdoc.pyd", "renderdoc.dll", "renderdoccmd.exe")
 VC_RUNTIME_FILES = ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 
 
+def _configure_console() -> None:
+    """Never crash on a cp1252/cp936 console (GitHub runner and legacy cmd)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):  # pragma: no cover - not a TextIOWrapper
+            pass
+
+
+_configure_console()
+
+
 def log(message: str) -> None:
     print(f"[bundle] {message}", flush=True)
 

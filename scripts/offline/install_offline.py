@@ -37,6 +37,18 @@ REQUIRED_PY = (3, 12)  # renderdoc.pyd is a cp312 native extension; do not relax
 BUNDLE = Path(__file__).resolve().parent
 
 
+def _configure_console() -> None:
+    """Never crash on a cp1252/cp936 console (GitHub runner and legacy cmd)."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):  # pragma: no cover - not a TextIOWrapper
+            pass
+
+
+_configure_console()
+
+
 def log(msg: str) -> None:
     print(f"[rdc] {msg}", flush=True)
 
