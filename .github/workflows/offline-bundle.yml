@@ -1,0 +1,200 @@
+name: Offline bundle
+
+# Builds the Windows x64 "green" bundle:
+#   rdc-cli wheel + deps (cp312/win_amd64)
+#   + RenderDoc python module compiled from the upstream release tag
+#   + Android APKs, VC runtime DLLs, offline installer + docs
+# and publishes rdc-cli-<renderdoc_version>.zip to a GitHub release.
+#
+# Everything runs on a stock windows-2022 runner: MSBuild comes from the
+# preinstalled VS Build Tools, and no Qt is needed because
+# scripts/ci_build_payload.py builds the RenderDoc projects we ship directly
+# (breakpad + pyrenderdoc_module + renderdoccmd) instead of the Qt-based solution.
+
+on:
+  workflow_dispatch:
+    inputs:
+      renderdoc_version:
+        description: "RenderDoc tag to build (empty = latest upstream release, e.g. v1.47)"
+        required: false
+        default: ""
+      publish:
+        description: "Create/update the GitHub release with the bundle"
+        type: boolean
+        default: true
+      build_version:
+        description: "Force rdc-cli version (empty = derive from git tags via setuptools-scm)"
+        required: false
+        default: ""
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.renderdoc_version }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  PYTHON_VERSION: "3.12"
+  PAYLOAD_DIR: ${{ github.workspace }}/payload/win-x64
+  APK_DIR: ${{ github.workspace }}/payload/share/renderdoc/plugins/android
+
+jobs:
+  bundle:
+    name: Build offline bundle (win-x64)
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # setuptools-scm needs tags for the wheel version
+
+      - name: Fetch upstream tags
+        # Forks do not inherit tags; without them setuptools-scm falls back to 0.1.devN.
+        run: git fetch --tags --force https://github.com/BANANASJIM/rdc-cli.git "+refs/tags/*:refs/tags/*"
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          architecture: x64
+
+      - name: Resolve RenderDoc version
+        id: rdoc
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.renderdoc_version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:INPUT_VERSION
+          if ([string]::IsNullOrWhiteSpace($tag)) {
+            $tag = gh api repos/baldurk/renderdoc/releases/latest --jq .tag_name
+          }
+          $tag = $tag.Trim()
+          if ($tag -notmatch '^v?\d+\.\d+$') {
+            throw "unexpected RenderDoc tag: '$tag'"
+          }
+          if (-not $tag.StartsWith('v')) { $tag = "v$tag" }
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$($tag.TrimStart('v'))" >> $env:GITHUB_OUTPUT
+          Write-Host "RenderDoc $tag"
+
+      - name: Install rdc-cli (this checkout)
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Fetch RenderDoc source
+        shell: pwsh
+        run: |
+          $src = ".build/renderdoc/renderdoc"
+          if (-not (Test-Path "$src/.git")) {
+            New-Item -ItemType Directory -Force .build/renderdoc | Out-Null
+            git clone --depth 1 --branch ${{ steps.rdoc.outputs.tag }} `
+              https://github.com/baldurk/renderdoc.git $src
+          }
+          git -C $src rev-parse HEAD
+
+      - name: Restore payload cache
+        id: cache-payload
+        uses: actions/cache@v4
+        with:
+          path: payload
+          key: rdoc-${{ steps.rdoc.outputs.version }}-py${{ env.PYTHON_VERSION }}-win64-v1
+
+      - name: Build RenderDoc payload
+        if: steps.cache-payload.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          python scripts/ci_build_payload.py `
+            --version ${{ steps.rdoc.outputs.tag }} `
+            --out "$env:PAYLOAD_DIR" `
+            --build-dir .build/renderdoc
+
+      - name: Set RENDERDOC_PYTHON_PATH
+        shell: pwsh
+        run: |
+          "RENDERDOC_PYTHON_PATH=$env:PAYLOAD_DIR" >> $env:GITHUB_ENV
+          Get-ChildItem "$env:PAYLOAD_DIR" | Select-Object Name, Length
+
+      - name: Download Android APKs
+        shell: pwsh
+        run: |
+          if (-not (Get-ChildItem "$env:APK_DIR/*.apk" -ErrorAction SilentlyContinue)) {
+            rdc setup-renderdoc --android
+          }
+          Get-ChildItem $env:APK_DIR | Select-Object Name, Length
+
+      - name: Build wheels
+        shell: pwsh
+        env:
+          INPUT_BUILD_VERSION: ${{ inputs.build_version }}
+        run: |
+          if (-not [string]::IsNullOrWhiteSpace($env:INPUT_BUILD_VERSION)) {
+            $env:SETUPTOOLS_SCM_PRETEND_VERSION = $env:INPUT_BUILD_VERSION
+          }
+          $abi = "cp" + ($env:PYTHON_VERSION -replace '\.', '')
+          New-Item -ItemType Directory -Force dist-wheels | Out-Null
+          python -m pip wheel . --no-deps --wheel-dir dist-wheels
+          python -m pip download click Pillow numpy `
+            --dest dist-wheels `
+            --only-binary=:all: `
+            --platform win_amd64 `
+            --python-version $env:PYTHON_VERSION `
+            --implementation cp `
+            --abi $abi
+          Get-ChildItem dist-wheels | Select-Object Name, Length
+
+      - name: Assemble bundle
+        shell: pwsh
+        run: |
+          python scripts/build_offline_bundle.py `
+            --renderdoc-version ${{ steps.rdoc.outputs.version }} `
+            --renderdoc-source .build/renderdoc/renderdoc `
+            --payload-dir "$env:PAYLOAD_DIR" `
+            --apk-dir "$env:APK_DIR" `
+            --wheels-dir dist-wheels `
+            --out dist
+
+      - name: Verify bundle (clean install + self check)
+        shell: pwsh
+        run: |
+          $bundle = "dist/rdc-cli-${{ steps.rdoc.outputs.version }}"
+          python "$bundle/install_offline.py" --verify-bundle
+          python "$bundle/install_offline.py" --force --no-pip
+          python "$bundle/install_offline.py" --check --no-pip
+          rdc doctor
+          Get-Content "dist/rdc-cli-${{ steps.rdoc.outputs.version }}.zip.sha256" -Raw
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rdc-cli-${{ steps.rdoc.outputs.version }}
+          path: |
+            dist/rdc-cli-${{ steps.rdoc.outputs.version }}.zip
+            dist/rdc-cli-${{ steps.rdoc.outputs.version }}.zip.sha256
+            dist/rdc-cli-${{ steps.rdoc.outputs.version }}-notes.md
+          retention-days: 14
+
+      - name: Upload GitHub release
+        if: inputs.publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.rdoc.outputs.version }}"
+          $tag = "rdc-cli-$version"
+          $zip = "dist/$tag.zip"
+          $sum = "$zip.sha256"
+          $notes = "dist/$tag-notes.md"
+
+          gh release view $tag --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --repo $env:GITHUB_REPOSITORY `
+              --target $env:GITHUB_SHA `
+              --title "rdc-cli $version (offline Windows bundle)" `
+              --notes-file $notes
+          }
+          gh release upload $tag --repo $env:GITHUB_REPOSITORY --clobber $zip $sum
+          gh release view $tag --repo $env:GITHUB_REPOSITORY --json url,assets --jq '{url: .url, assets: [.assets[].name]}'

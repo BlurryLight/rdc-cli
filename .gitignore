@@ -21,3 +21,9 @@ _site/
 docs-astro/.astro/
 docs-astro/dist/
 docs-astro/node_modules/
+
+# offline bundle build scratch
+.venv-dev/
+dist-wheels/
+.build/
+payload/
